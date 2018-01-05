@@ -38,9 +38,9 @@ var NetworkUIController = function($scope, $document, $location, $window, $http,
 
   $scope.initial_messages = [];
   if (!$scope.disconnected) {
-  $scope.control_socket = new ReconnectingWebSocket("wss://" + window.location.host + "/network_ui/topology?inventory_id=" + $scope.inventory_id,
-                                                           null,
-                                                           {debug: false, reconnectInterval: 300});
+      $scope.control_socket = new ReconnectingWebSocket("wss://" + window.location.host + "/network_ui/topology?inventory_id=" + $scope.inventory_id,
+                                                         null,
+                                                         {debug: false, reconnectInterval: 300});
   } else {
       $scope.control_socket = {
           on_message: util.noop
@@ -184,7 +184,7 @@ var NetworkUIController = function($scope, $document, $location, $window, $http,
                    let host = hosts[i];
                    console.log(host);
                    host.data = jsyaml.safeLoad(host.variables);
-                   var device = new models.Device(0, host.data.name, 0, 0, host.data.type, host.id);
+                   var device = new models.Device(0, host.data.name, 0, 0, host.data.type, host.id, host.variables);
                    device.icon = true;
                    $scope.inventory_toolbox.items.push(device);
                }
@@ -620,16 +620,20 @@ var NetworkUIController = function($scope, $document, $location, $window, $http,
 	  $event.preventDefault();
 	};
 
+    $scope.$watchCollection('selected_items', function(){
+        $scope.onDetailsContextButton(false);
+    });
+
     // Conext Menu Button Handlers
-    $scope.onDetailsContextButton = function (button) {
-        console.log(button.name);
+    $scope.onDetailsContextButton = function (panelBoolean) {
         if (!$scope.disconnected) {
             if($scope.selected_items.length === 1){
                 let host_id = $scope.selected_items[0].host_id;
-                let url = `/api/v2/hosts/${host_id}/?format=json`;
+                let url = `/api/v2/hosts/${host_id}/`;
                 $http.get(url)
-                     .then(function(host) {
-                         $scope.$emit('retrievedHostData', host.data);
+                     .then(function(response) {
+                         let host = response.data;
+                         $scope.$emit('retrievedHostData', host, panelBoolean !== null ? panelBoolean: true);
                          $scope.context_menus[0].enabled = false;
                      })
                      .catch(function(error) {
@@ -963,7 +967,8 @@ var NetworkUIController = function($scope, $document, $location, $window, $http,
                                        data.name,
                                        data.x,
                                        data.y,
-                                       data.type);
+                                       data.type,
+                                       data.host_id);
         $scope.device_id_seq = util.natural_numbers(data.id);
         $scope.devices.push(device);
     };
@@ -1287,8 +1292,6 @@ var NetworkUIController = function($scope, $document, $location, $window, $http,
     };
 
     $scope.onTopology = function(data) {
-        console.log("Loading topology");
-        console.log(data);
         $scope.topology_id = data.topology_id;
         $scope.panX = data.panX;
         $scope.panY = data.panX;
@@ -1296,7 +1299,6 @@ var NetworkUIController = function($scope, $document, $location, $window, $http,
         $scope.link_id_seq = util.natural_numbers(data.link_id_seq);
         $scope.group_id_seq = util.natural_numbers(data.group_id_seq);
         $scope.device_id_seq = util.natural_numbers(data.device_id_seq);
-        // $location.search({topology_id: data.topology_id, inventory_id: $scope.inventory_id});
     };
 
     $scope.onDeviceSelected = function(data) {
@@ -1415,9 +1417,6 @@ var NetworkUIController = function($scope, $document, $location, $window, $http,
     };
 
     $scope.onSnapshot = function (data) {
-
-        console.log("Loading Snapshot");
-        console.log(data);
 
         //Erase the existing state
         $scope.devices = [];
