@@ -7,7 +7,9 @@ from awx.main.access import (
     # WorkflowJobNodeAccess
 )
 
-from awx.main.models import InventorySource
+from rest_framework.exceptions import PermissionDenied
+
+from awx.main.models import InventorySource, JobLaunchConfig
 
 
 @pytest.fixture
@@ -48,6 +50,13 @@ class TestWorkflowJobTemplateAccess:
         assert org_admin in wfjt.admin_role
         assert org_admin in wfjt.execute_role
         assert org_admin in wfjt.read_role
+
+    def test_org_workflow_admin_role_inheritance(self, wfjt, org_member):
+        wfjt.organization.workflow_admin_role.members.add(org_member)
+
+        assert org_member in wfjt.admin_role
+        assert org_member in wfjt.execute_role
+        assert org_member in wfjt.read_role
 
 
 @pytest.mark.django_db
@@ -103,8 +112,12 @@ class TestWorkflowJobTemplateNodeAccess:
 @pytest.mark.django_db
 class TestWorkflowJobAccess:
 
-    def test_org_admin_can_delete_workflow_job(self, workflow_job, org_admin):
-        access = WorkflowJobAccess(org_admin)
+    @pytest.mark.parametrize("role_name", ["admin_role", "workflow_admin_role"])
+    def test_org_admin_can_delete_workflow_job(self, role_name, workflow_job, org_member):
+        role = getattr(workflow_job.workflow_job_template.organization, role_name)
+        role.members.add(org_member)
+
+        access = WorkflowJobAccess(org_member)
         assert access.can_delete(workflow_job)
 
     def test_wfjt_admin_can_delete_workflow_job(self, workflow_job, rando):
@@ -124,6 +137,45 @@ class TestWorkflowJobAccess:
         access = WorkflowJobAccess(rando)
         assert access.can_cancel(workflow_job)
 
+    def test_execute_role_relaunch(self, wfjt, workflow_job, rando):
+        wfjt.execute_role.members.add(rando)
+        JobLaunchConfig.objects.create(job=workflow_job)
+        assert WorkflowJobAccess(rando).can_start(workflow_job)
+
+    def test_can_start_with_limits(self, workflow_job, inventory, admin_user):
+        inventory.organization.max_hosts = 1
+        inventory.organization.save()
+        inventory.hosts.create(name="Existing host 1")
+        inventory.hosts.create(name="Existing host 2")
+        workflow_job.inventory = inventory
+        workflow_job.save()
+
+        assert WorkflowJobAccess(admin_user).can_start(workflow_job)
+
+    def test_cannot_relaunch_friends_job(self, wfjt, rando, alice):
+        workflow_job = wfjt.workflow_jobs.create(name='foo', created_by=alice)
+        JobLaunchConfig.objects.create(
+            job=workflow_job,
+            extra_data={'foo': 'fooforyou'}
+        )
+        wfjt.execute_role.members.add(alice)
+        assert not WorkflowJobAccess(rando).can_start(workflow_job)
+
+    def test_relaunch_inventory_access(self, workflow_job, inventory, rando):
+        wfjt = workflow_job.workflow_job_template
+        wfjt.execute_role.members.add(rando)
+        assert rando in wfjt.execute_role
+        workflow_job.created_by = rando
+        workflow_job.inventory = inventory
+        workflow_job.save()
+        wfjt.ask_inventory_on_launch = True
+        wfjt.save()
+        JobLaunchConfig.objects.create(job=workflow_job, inventory=inventory)
+        with pytest.raises(PermissionDenied):
+            WorkflowJobAccess(rando).can_start(workflow_job)
+        inventory.use_role.members.add(rando)
+        assert WorkflowJobAccess(rando).can_start(workflow_job)
+
 
 @pytest.mark.django_db
 class TestWFJTCopyAccess:
@@ -132,9 +184,13 @@ class TestWFJTCopyAccess:
         admin_access = WorkflowJobTemplateAccess(org_admin)
         assert admin_access.can_copy(wfjt)
 
+        wfjt.organization.workflow_admin_role.members.add(org_member)
+        admin_access = WorkflowJobTemplateAccess(org_member)
+        assert admin_access.can_copy(wfjt)
+
     def test_copy_permissions_user(self, wfjt, org_admin, org_member):
         '''
-        Only org admins are able to add WFJTs, only org admins
+        Only org admins and org workflow admins are able to add WFJTs, only org admins
         are able to copy them
         '''
         wfjt.admin_role.members.add(org_member)

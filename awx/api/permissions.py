@@ -9,15 +9,15 @@ from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework import permissions
 
 # AWX
-from awx.main.access import * # noqa
-from awx.main.models import * # noqa
+from awx.main.access import check_user_access
+from awx.main.models import Inventory, UnifiedJob
 from awx.main.utils import get_object_or_400
 
 logger = logging.getLogger('awx.api.permissions')
 
-__all__ = ['ModelAccessPermission', 'JobTemplateCallbackPermission',
+__all__ = ['ModelAccessPermission', 'JobTemplateCallbackPermission', 'VariableDataPermission',
            'TaskPermission', 'ProjectUpdatePermission', 'InventoryInventorySourcesUpdatePermission',
-           'UserPermission', 'IsSuperUser']
+           'UserPermission', 'IsSuperUser', 'InstanceGroupTowerPermission', 'WorkflowApprovalPermission']
 
 
 class ModelAccessPermission(permissions.BasePermission):
@@ -74,12 +74,8 @@ class ModelAccessPermission(permissions.BasePermission):
             # FIXME: For some reason this needs to return True
             # because it is first called with obj=None?
             return True
-        if getattr(view, 'is_variable_data', False):
-            return check_user_access(request.user, view.model, 'change', obj,
-                                     dict(variables=request.data))
-        else:
-            return check_user_access(request.user, view.model, 'change', obj,
-                                     request.data)
+        return check_user_access(request.user, view.model, 'change', obj,
+                                 request.data)
 
     def check_patch_permissions(self, request, view, obj=None):
         return self.check_put_permissions(request, view, obj)
@@ -99,7 +95,7 @@ class ModelAccessPermission(permissions.BasePermission):
         '''
 
         # Don't allow anonymous users. 401, not 403, hence no raised exception.
-        if not request.user or request.user.is_anonymous():
+        if not request.user or request.user.is_anonymous:
             return False
 
         # Always allow superusers
@@ -163,6 +159,15 @@ class JobTemplateCallbackPermission(ModelAccessPermission):
             return True
 
 
+class VariableDataPermission(ModelAccessPermission):
+
+    def check_put_permissions(self, request, view, obj=None):
+        if not obj:
+            return True
+        return check_user_access(request.user, view.model, 'change', obj,
+                                 dict(variables=request.data))
+
+
 class TaskPermission(ModelAccessPermission):
     '''
     Permission checks used for API callbacks from running a task.
@@ -189,6 +194,17 @@ class TaskPermission(ModelAccessPermission):
             return bool(not obj or obj.pk == unified_job.inventory_id)
         else:
             return False
+
+
+class WorkflowApprovalPermission(ModelAccessPermission):
+    '''
+    Permission check used by workflow `approval` and `deny` views to determine
+    who has access to approve and deny paused workflow nodes
+    '''
+
+    def check_post_permissions(self, request, view, obj=None):
+        approval = get_object_or_400(view.model, pk=view.kwargs['pk'])
+        return check_user_access(request.user, view.model, 'approve_or_deny', approval)
 
 
 class ProjectUpdatePermission(ModelAccessPermission):
@@ -226,3 +242,15 @@ class IsSuperUser(permissions.BasePermission):
 
     def has_permission(self, request, view):
         return request.user and request.user.is_superuser
+
+
+class InstanceGroupTowerPermission(ModelAccessPermission):
+    def has_object_permission(self, request, view, obj):
+        if request.method == 'DELETE' and obj.name == "tower":
+            return False
+        return super(InstanceGroupTowerPermission, self).has_object_permission(request, view, obj)
+
+
+class WebhookKeyPermission(permissions.BasePermission):
+    def has_object_permission(self, request, view, obj):
+        return request.user.can_access(view.model, 'admin', obj, request.data)

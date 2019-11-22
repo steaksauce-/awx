@@ -61,11 +61,10 @@ module.exports = {
         const templates = client.page.templates();
 
         client.useCss();
-        client.resizeWindow(1200, 800);
         client.login();
         client.waitForAngular();
 
-        templates.navigate();
+        templates.load();
         templates.waitForElementVisible('div.spinny');
         templates.waitForElementNotVisible('div.spinny');
 
@@ -116,11 +115,10 @@ module.exports = {
         const templates = client.page.templates();
 
         client.useCss();
-        client.resizeWindow(1200, 800);
         client.login();
         client.waitForAngular();
 
-        templates.navigate();
+        templates.load();
         templates.waitForElementVisible('div.spinny');
         templates.waitForElementNotVisible('div.spinny');
 
@@ -166,11 +164,10 @@ module.exports = {
         const templates = client.page.templates();
 
         client.useCss();
-        client.resizeWindow(1200, 800);
         client.login(data.user.username);
         client.waitForAngular();
 
-        templates.navigate();
+        templates.load();
         templates.waitForElementVisible('div.spinny');
         templates.waitForElementNotVisible('div.spinny');
 
@@ -201,7 +198,8 @@ module.exports = {
         templates.expect.element(promptActionButton).enabled;
         templates.expect.element(promptCloseButton).enabled;
 
-        templates.expect.element(promptHeader).text.contain('COPY WORKFLOW');
+        templates.expect.element(promptHeader).text.contain('COPY');
+        templates.expect.element(promptHeader).text.contain(`${data.workflow.name.toUpperCase()}`);
         templates.expect.element(promptWarning).text.contain('Unified Job Templates');
         templates.expect.element(promptWarning).text.contain(`${data.source.name}`);
 

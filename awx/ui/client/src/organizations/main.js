@@ -55,7 +55,32 @@ angular.module('Organizations', [
                         activityStreamTarget: 'organization'
                     },
                     resolve: {
+                        add: {
+                            ConfigData: ['ConfigService', 'ProcessErrors', (ConfigService, ProcessErrors) => {
+                                return ConfigService.getConfig()
+                                    .then(response => response)
+                                    .catch(({data, status}) => {
+                                        ProcessErrors(null, data, status, null, {
+                                            hdr: 'Error!',
+                                            msg: 'Failed to get config. GET returned status: ' +
+                                                'status: ' + status
+                                        });
+                                    });
+
+                            }]
+                        },
                         edit: {
+                            ConfigData: ['ConfigService', 'ProcessErrors', (ConfigService, ProcessErrors) => {
+                                return ConfigService.getConfig()
+                                    .then(response => response)
+                                    .catch(({data, status}) => {
+                                        ProcessErrors(null, data, status, null, {
+                                            hdr: 'Error!',
+                                            msg: 'Failed to get config. GET returned status: ' +
+                                                'status: ' + status
+                                        });
+                                    });
+                            }],
                             InstanceGroupsData: ['$stateParams', 'Rest', 'GetBasePath', 'ProcessErrors',
                                 function($stateParams, Rest, GetBasePath, ProcessErrors){
                                     let path = `${GetBasePath('organizations')}${$stateParams.organization_id}/instance_groups/`;
@@ -73,7 +98,49 @@ angular.module('Organizations', [
                                                     'status: ' + status
                                             });
                                     });
-                                }]
+                            }],
+                            isOrgAuditor: ['Rest', 'ProcessErrors', 'GetBasePath', 'i18n', '$stateParams',
+                                function(Rest, ProcessErrors, GetBasePath, i18n, $stateParams) {
+                                    Rest.setUrl(`${GetBasePath('organizations')}?role_level=auditor_role&id=${$stateParams.organization_id}`);
+                                    return Rest.get()
+                                        .then(({data}) => {
+                                            return data.count > 0;
+                                        })
+                                        .catch(({data, status}) => {
+                                            ProcessErrors(null, data, status, null, {
+                                                hdr: i18n._('Error!'),
+                                                msg: i18n._('Failed while checking to see if user is a notification administrator of this organization. GET returned ') + status
+                                            });
+                                    });
+                            }],
+                            isOrgAdmin: ['ProcessErrors', 'i18n', '$stateParams', 'OrgAdminLookup',
+                                function(ProcessErrors, i18n, $stateParams, OrgAdminLookup) {
+                                    return OrgAdminLookup.checkForAdminAccess({organization: $stateParams.organization_id})
+                                    .then(function(isOrgAdmin){
+                                        return isOrgAdmin;
+                                    })
+                                    .catch(({data, status}) => {
+                                        ProcessErrors(null, data, status, null, {
+                                            hdr: i18n._('Error!'),
+                                            msg: i18n._('Failed while checking to see if user is an administrator of this organization. GET returned ') + status
+                                        });
+                                    });
+                                    
+                            }],
+                            isNotificationAdmin: ['Rest', 'ProcessErrors', 'GetBasePath', 'i18n',
+                                function(Rest, ProcessErrors, GetBasePath, i18n) {
+                                    Rest.setUrl(`${GetBasePath('organizations')}?role_level=notification_admin_role&page_size=1`);
+                                    return Rest.get()
+                                        .then(({data}) => {
+                                            return data.count > 0;
+                                        })
+                                        .catch(({data, status}) => {
+                                            ProcessErrors(null, data, status, null, {
+                                                hdr: i18n._('Error!'),
+                                                msg: i18n._('Failed to get organizations for which this user is a notification admin. GET returned ') + status
+                                            });
+                                    });
+                            }],
                         }
                     }
                     // concat manually-defined state definitions with generated defintions

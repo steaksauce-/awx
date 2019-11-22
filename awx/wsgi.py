@@ -8,7 +8,12 @@ from awx import __version__ as tower_version
 from awx import prepare_env, MODE
 prepare_env()
 
-from django.core.wsgi import get_wsgi_application  # NOQA
+import django  # NOQA
+from django.conf import settings  # NOQA
+from django.urls import resolve  # NOQA
+from django.core.wsgi import get_wsgi_application # NOQA
+import social_django  # NOQA
+
 
 """
 WSGI config for AWX project.
@@ -28,6 +33,12 @@ if MODE == 'production':
     except Exception:
         logger.error("Missing or incorrect metadata for Tower version.  Ensure Tower was installed using the setup playbook.")
         raise Exception("Missing or incorrect metadata for Tower version.  Ensure Tower was installed using the setup playbook.")
+
+if social_django.__version__ != '2.1.0':
+    raise RuntimeError("social_django version other than 2.1.0 detected {}. \
+            Confirm that per-request social_django.utils.BACKENDS override \
+            still works".format(social_django.__version__))
+
 
 # Return the default Django WSGI application.
 application = get_wsgi_application()

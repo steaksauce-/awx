@@ -18,8 +18,23 @@ export default
                 launch = _launch_;
 
                 scope.toggle_row = (row) => {
-                    scope.promptData.prompts.inventory.value = row;
+                    if (!scope.readOnlyPrompts) {
+                        scope.promptData.prompts.inventory.value = row;
+                    }
                 };
+
+                scope.$watchCollection('inventories', () => {
+                    if(scope.inventories && scope.inventories.length > 0) {
+                        scope.inventories.forEach((credential, i) => {
+                            if (_.has(scope, 'promptData.prompts.inventory.value.id') && scope.promptData.prompts.inventory.value.id === scope.inventories[i].id) {
+                                scope.inventories[i].checked = 1;
+                            } else {
+                                scope.inventories[i].checked = 0;
+                            }
+
+                        });
+                    }
+                });
             };
 
             vm.deleteSelectedInventory = () => {
@@ -31,7 +46,7 @@ export default
             };
 
             vm.revert = () => {
-                scope.promptData.prompts.inventory.value = scope.promptData.prompts.inventory.templateDefault;
+                scope.promptData.prompts.inventory.value = scope.promptData.launchConf.defaults.inventory;
             };
         }
     ];

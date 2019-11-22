@@ -4,16 +4,16 @@
  * All Rights Reserved
  *************************************************/
  export default
-    ['$scope', '$rootScope', '$state', '$stateParams', 'GroupList', 'InventoryUpdate',
-    'GroupsService', 'CancelSourceUpdate', 'rbacUiControlService', 'GetBasePath',
-    'GetHostsStatusMsg', 'Dataset', 'Find', 'QuerySet', 'inventoryData', 'canAdd',
+    ['$scope', '$state', '$stateParams', 'listDefinition', 'InventoryUpdate',
+    'GroupsService', 'CancelSourceUpdate',
+    'GetHostsStatusMsg', 'Dataset', 'inventoryData', 'canAdd',
     'InventoryHostsStrings', '$transitions',
-    function($scope, $rootScope, $state, $stateParams, GroupList, InventoryUpdate,
-        GroupsService, CancelSourceUpdate, rbacUiControlService, GetBasePath,
-        GetHostsStatusMsg, Dataset, Find, qs, inventoryData, canAdd,
+    function($scope, $state, $stateParams, listDefinition, InventoryUpdate,
+        GroupsService, CancelSourceUpdate,
+        GetHostsStatusMsg, Dataset, inventoryData, canAdd,
         InventoryHostsStrings, $transitions){
 
-        let list = GroupList;
+        let list = listDefinition;
 
         init();
 
@@ -85,10 +85,18 @@
         }
 
         $scope.createGroup = function(){
-            $state.go('inventories.edit.groups.add');
+            if ($state.includes('inventories.edit.groups')) {
+                $state.go('inventories.edit.groups.add');
+            } else if ($state.includes('inventories.edit.rootGroups')) {
+                $state.go('inventories.edit.rootGroups.add');
+            }
         };
         $scope.editGroup = function(id){
-            $state.go('inventories.edit.groups.edit', {group_id: id});
+            if ($state.includes('inventories.edit.groups')) {
+                $state.go('inventories.edit.groups.edit', {group_id: id});
+            } else if ($state.includes('inventories.edit.rootGroups')) {
+                $state.go('inventories.edit.rootGroups.edit', {group_id: id});
+            }
         };
         $scope.goToGroupGroups = function(id){
             $state.go('inventories.edit.groups.edit.nested_groups', {group_id: id});
@@ -127,7 +135,7 @@
         $scope.confirmDelete = function(){
             let reloadListStateParams = null;
 
-            if($scope.groups.length === 1 && $state.params.group_search && !_.isEmpty($state.params.group_search.page) && $state.params.group_search.page !== '1') {
+            if($scope.groups.length === 1 && $state.params.group_search && _.has($state, 'params.group_search.page') && $state.params.group_search.page !== '1') {
                 reloadListStateParams = _.cloneDeep($state.params);
                 reloadListStateParams.group_search.page = (parseInt(reloadListStateParams.group_search.page)-1).toString();
             }

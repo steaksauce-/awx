@@ -1,9 +1,11 @@
 import datetime
 import logging
+from collections import defaultdict
 
 from django.conf import settings
-from django.db import models
+from django.db import models, DatabaseError
 from django.utils.dateparse import parse_datetime
+from django.utils.text import Truncator
 from django.utils.timezone import utc
 from django.utils.translation import ugettext_lazy as _
 from django.utils.encoding import force_text
@@ -15,9 +17,42 @@ from awx.main.utils import ignore_inventory_computed_fields
 
 analytics_logger = logging.getLogger('awx.analytics.job_events')
 
+logger = logging.getLogger('awx.main.models.events')
+
 
 __all__ = ['JobEvent', 'ProjectUpdateEvent', 'AdHocCommandEvent',
            'InventoryUpdateEvent', 'SystemJobEvent']
+
+
+def sanitize_event_keys(kwargs, valid_keys):
+    # Sanity check: Don't honor keys that we don't recognize.
+    for key in list(kwargs.keys()):
+        if key not in valid_keys:
+            kwargs.pop(key)
+
+    # Truncate certain values over 1k
+    for key in [
+        'play', 'role', 'task', 'playbook'
+    ]:
+        if isinstance(kwargs.get('event_data', {}).get(key), str):
+            if len(kwargs['event_data'][key]) > 1024:
+                kwargs['event_data'][key] = Truncator(kwargs['event_data'][key]).chars(1024)
+
+
+def create_host_status_counts(event_data):
+    host_status = {}
+    host_status_keys = ['skipped', 'ok', 'changed', 'failures', 'dark']
+
+    for key in host_status_keys:
+        for host in event_data.get(key, {}):
+            host_status[host] = key
+
+    host_status_counts = defaultdict(lambda: 0)
+
+    for value in host_status.values():
+        host_status_counts[value] += 1
+
+    return dict(host_status_counts)
 
 
 class BasePlaybookEvent(CreatedModifiedModel):
@@ -48,6 +83,7 @@ class BasePlaybookEvent(CreatedModifiedModel):
     #       - runner_on*
     #     - playbook_on_task_start (once for each task within a play)
     #       - runner_on_failed
+    #       - runner_on_start
     #       - runner_on_ok
     #       - runner_on_error (not used for v2)
     #       - runner_on_skipped
@@ -67,6 +103,7 @@ class BasePlaybookEvent(CreatedModifiedModel):
     EVENT_TYPES = [
         # (level, event, verbose name, failed)
         (3, 'runner_on_failed', _('Host Failed'), True),
+        (3, 'runner_on_start', _('Host Started'), False),
         (3, 'runner_on_ok', _('Host OK'), False),
         (3, 'runner_on_error', _('Host Failure'), True),
         (3, 'runner_on_skipped', _('Host Skipped'), False),
@@ -114,7 +151,7 @@ class BasePlaybookEvent(CreatedModifiedModel):
     )
     event_data = JSONField(
         blank=True,
-        default={},
+        default=dict,
     )
     failed = models.BooleanField(
         default=False,
@@ -169,10 +206,19 @@ class BasePlaybookEvent(CreatedModifiedModel):
         default=0,
         editable=False,
     )
+    created = models.DateTimeField(
+        null=True,
+        default=None,
+        editable=False,
+        db_index=True,
+    )
 
     @property
     def event_level(self):
         return self.LEVEL_FOR_EVENT.get(self.event, 0)
+
+    def get_host_status_counts(self):
+        return create_host_status_counts(getattr(self, 'event_data', {}))
 
     def get_event_display2(self):
         msg = self.get_event_display()
@@ -235,12 +281,6 @@ class BasePlaybookEvent(CreatedModifiedModel):
             if res.get('changed', False):
                 self.changed = True
                 updated_fields.add('changed')
-            # If we're not in verbose mode, wipe out any module arguments.
-            invocation = res.get('invocation', None)
-            if isinstance(invocation, dict) and self.job_verbosity == 0 and 'module_args' in invocation:
-                event_data['res']['invocation']['module_args'] = ''
-                self.event_data = event_data
-                updated_fields.add('event_data')
         if self.event == 'playbook_on_stats':
             try:
                 failures_dict = event_data.get('failures', {})
@@ -261,7 +301,7 @@ class BasePlaybookEvent(CreatedModifiedModel):
         return updated_fields
 
     @classmethod
-    def create_from_data(self, **kwargs):
+    def create_from_data(cls, **kwargs):
         pk = None
         for key in ('job_id', 'project_update_id'):
             if key in kwargs:
@@ -283,42 +323,12 @@ class BasePlaybookEvent(CreatedModifiedModel):
         except (KeyError, ValueError):
             kwargs.pop('created', None)
 
-        # Sanity check: Don't honor keys that we don't recognize.
-        for key in kwargs.keys():
-            if key not in self.VALID_KEYS:
-                kwargs.pop(key)
-
-        event_data = kwargs.get('event_data', None)
-        artifact_dict = None
-        if event_data:
-            artifact_dict = event_data.pop('artifact_data', None)
-
-        job_event = self.objects.create(**kwargs)
-
+        sanitize_event_keys(kwargs, cls.VALID_KEYS)
+        workflow_job_id = kwargs.pop('workflow_job_id', None)
+        job_event = cls.objects.create(**kwargs)
+        if workflow_job_id:
+            setattr(job_event, 'workflow_job_id', workflow_job_id)
         analytics_logger.info('Event data saved.', extra=dict(python_objects=dict(job_event=job_event)))
-
-        # Save artifact data to parent job (if provided).
-        if artifact_dict:
-            if event_data and isinstance(event_data, dict):
-                # Note: Core has not added support for marking artifacts as
-                # sensitive yet. Going forward, core will not use
-                # _ansible_no_log to denote sensitive set_stats calls.
-                # Instead, they plan to add a flag outside of the traditional
-                # no_log mechanism. no_log will not work for this feature,
-                # in core, because sensitive data is scrubbed before sending
-                # data to the callback. The playbook_on_stats is the callback
-                # in which the set_stats data is used.
-
-                # Again, the sensitive artifact feature has not yet landed in
-                # core. The below is how we mark artifacts payload as
-                # senstive
-                # artifact_dict['_ansible_no_log'] = True
-                #
-                parent_job = self.objects.filter(pk=pk).first()
-                if hasattr(parent_job, 'artifacts') and parent_job.artifacts != artifact_dict:
-                    parent_job.artifacts = artifact_dict
-                    parent_job.save(update_fields=['artifacts'])
-
         return job_event
 
     @property
@@ -341,8 +351,20 @@ class BasePlaybookEvent(CreatedModifiedModel):
 
             # Update host related field from host_name.
             if hasattr(self, 'job') and not self.host_id and self.host_name:
-                host_qs = self.job.inventory.hosts.filter(name=self.host_name)
-                host_id = host_qs.only('id').values_list('id', flat=True).first()
+                if self.job.inventory.kind == 'smart':
+                    # optimization to avoid calling inventory.hosts, which
+                    # can take a long time to run under some circumstances
+                    from awx.main.models.inventory import SmartInventoryMembership
+                    membership = SmartInventoryMembership.objects.filter(
+                        inventory=self.job.inventory, host__name=self.host_name
+                    ).first()
+                    if membership:
+                        host_id = membership.host_id
+                    else:
+                        host_id = None
+                else:
+                    host_qs = self.job.inventory.hosts.filter(name=self.host_name)
+                    host_id = host_qs.only('id').values_list('id', flat=True).first()
                 if host_id != self.host_id:
                     self.host_id = host_id
                     if 'host_id' not in update_fields:
@@ -353,12 +375,22 @@ class BasePlaybookEvent(CreatedModifiedModel):
         if hasattr(self, 'job') and not from_parent_update:
             if getattr(settings, 'CAPTURE_JOB_EVENT_HOSTS', False):
                 self._update_hosts()
-            if self.event == 'playbook_on_stats':
-                self._update_parents_failed_and_changed()
+            if self.parent_uuid:
+                kwargs = {}
+                if self.changed is True:
+                    kwargs['changed'] = True
+                if self.failed is True:
+                    kwargs['failed'] = True
+                if kwargs:
+                    JobEvent.objects.filter(job_id=self.job_id, uuid=self.parent_uuid).update(**kwargs)
 
+            if self.event == 'playbook_on_stats':
                 hostnames = self._hostnames()
                 self._update_host_summary_from_stats(hostnames)
-                self.job.inventory.update_computed_fields()
+                try:
+                    self.job.inventory.update_computed_fields()
+                except DatabaseError:
+                    logger.exception('Computed fields database error saving event {}'.format(self.pk))
 
 
 
@@ -367,7 +399,7 @@ class JobEvent(BasePlaybookEvent):
     An event/message logged from the callback when running a job.
     '''
 
-    VALID_KEYS = BasePlaybookEvent.VALID_KEYS + ['job_id']
+    VALID_KEYS = BasePlaybookEvent.VALID_KEYS + ['job_id', 'workflow_job_id']
 
     class Meta:
         app_label = 'main'
@@ -421,7 +453,7 @@ class JobEvent(BasePlaybookEvent):
     def get_absolute_url(self, request=None):
         return reverse('api:job_event_detail', kwargs={'pk': self.pk}, request=request)
 
-    def __unicode__(self):
+    def __str__(self):
         return u'%s @ %s' % (self.get_event_display2(), self.created.isoformat())
 
     def _update_from_event_data(self):
@@ -432,15 +464,6 @@ class JobEvent(BasePlaybookEvent):
             setattr(self, 'host_name', value)
             updated_fields.add('host_name')
         return updated_fields
-
-    def _update_parents_failed_and_changed(self):
-        # Update parent events to reflect failed, changed
-        runner_events = JobEvent.objects.filter(job=self.job,
-                                                event__startswith='runner_on')
-        changed_events = runner_events.filter(changed=True)
-        failed_events = runner_events.filter(failed=True)
-        JobEvent.objects.filter(uuid__in=changed_events.values_list('parent_uuid', flat=True)).update(changed=True)
-        JobEvent.objects.filter(uuid__in=failed_events.values_list('parent_uuid', flat=True)).update(failed=True)
 
     def _update_hosts(self, extra_host_pks=None):
         # Update job event hosts m2m from host_name, propagate to parent events.
@@ -476,11 +499,14 @@ class JobEvent(BasePlaybookEvent):
 
     def _update_host_summary_from_stats(self, hostnames):
         with ignore_inventory_computed_fields():
+            if not self.job or not self.job.inventory:
+                logger.info('Event {} missing job or inventory, host summaries not updated'.format(self.pk))
+                return
             qs = self.job.inventory.hosts.filter(name__in=hostnames)
             job = self.job
             for host in hostnames:
                 host_stats = {}
-                for stat in ('changed', 'dark', 'failures', 'ok', 'processed', 'skipped'):
+                for stat in ('changed', 'dark', 'failures', 'ignored', 'ok', 'processed', 'rescued', 'skipped'):
                     try:
                         host_stats[stat] = self.event_data.get(stat, {}).get(host, 0)
                     except AttributeError:  # in case event_data[stat] isn't a dict.
@@ -507,7 +533,7 @@ class JobEvent(BasePlaybookEvent):
 
 class ProjectUpdateEvent(BasePlaybookEvent):
 
-    VALID_KEYS = BasePlaybookEvent.VALID_KEYS + ['project_update_id']
+    VALID_KEYS = BasePlaybookEvent.VALID_KEYS + ['project_update_id', 'workflow_job_id']
 
     class Meta:
         app_label = 'main'
@@ -546,7 +572,7 @@ class BaseCommandEvent(CreatedModifiedModel):
 
     event_data = JSONField(
         blank=True,
-        default={},
+        default=dict,
     )
     uuid = models.CharField(
         max_length=1024,
@@ -574,11 +600,11 @@ class BaseCommandEvent(CreatedModifiedModel):
         editable=False,
     )
 
-    def __unicode__(self):
+    def __str__(self):
         return u'%s @ %s' % (self.get_event_display(), self.created.isoformat())
 
     @classmethod
-    def create_from_data(self, **kwargs):
+    def create_from_data(cls, **kwargs):
         # Convert the datetime for the event's creation
         # appropriately, and include a time zone for it.
         #
@@ -592,17 +618,32 @@ class BaseCommandEvent(CreatedModifiedModel):
         except (KeyError, ValueError):
             kwargs.pop('created', None)
 
-        # Sanity check: Don't honor keys that we don't recognize.
-        for key in kwargs.keys():
-            if key not in self.VALID_KEYS:
-                kwargs.pop(key)
+        sanitize_event_keys(kwargs, cls.VALID_KEYS)
+        kwargs.pop('workflow_job_id', None)
+        event = cls.objects.create(**kwargs)
+        if isinstance(event, AdHocCommandEvent):
+            analytics_logger.info(
+                'Event data saved.',
+                extra=dict(python_objects=dict(job_event=event))
+            )
+        return event
 
-        return self.objects.create(**kwargs)
+    def get_event_display(self):
+        '''
+        Needed for __unicode__
+        '''
+        return self.event
+
+    def get_event_display2(self):
+        return self.get_event_display()
+
+    def get_host_status_counts(self):
+        return create_host_status_counts(getattr(self, 'event_data', {}))
 
 
 class AdHocCommandEvent(BaseCommandEvent):
 
-    VALID_KEYS = BaseCommandEvent.VALID_KEYS + ['ad_hoc_command_id', 'event']
+    VALID_KEYS = BaseCommandEvent.VALID_KEYS + ['ad_hoc_command_id', 'event', 'workflow_job_id']
 
     class Meta:
         app_label = 'main'
@@ -710,7 +751,7 @@ class AdHocCommandEvent(BaseCommandEvent):
 
 class InventoryUpdateEvent(BaseCommandEvent):
 
-    VALID_KEYS = BaseCommandEvent.VALID_KEYS + ['inventory_update_id']
+    VALID_KEYS = BaseCommandEvent.VALID_KEYS + ['inventory_update_id', 'workflow_job_id']
 
     class Meta:
         app_label = 'main'

@@ -166,18 +166,6 @@ module.exports = {
 
         credentials.section.edit.expect.section('@details').visible;
     },
-    'credential is searchable after saving': client => {
-        const credentials = client.page.credentials();
-        const row = '#credentials_table tbody tr';
-
-        credentials.section.list.section.search
-            .waitForElementVisible('@input', AWX_E2E_TIMEOUT_LONG)
-            .setValue('@input', `name:${store.credential.name}`)
-            .click('@searchButton');
-
-        credentials.waitForElementNotPresent(`${row}:nth-of-type(2)`);
-        credentials.expect.element(row).text.contain(store.credential.name);
-    },
     'change the password after saving': client => {
         const credentials = client.page.credentials();
         const { edit } = credentials.section;
@@ -185,12 +173,13 @@ module.exports = {
 
         machine.section.password.expect.element('@replace').visible;
         machine.section.password.expect.element('@replace').enabled;
-        machine.section.password.expect.element('@revert').not.present;
+        machine.section.password.expect.element('@revert').not.visible;
 
         machine.expect.element('@password').not.enabled;
 
         machine.section.password.click('@replace');
-        machine.section.password.expect.element('@replace').not.present;
+
+        machine.section.password.expect.element('@replace').not.visible;
         machine.section.password.expect.element('@revert').visible;
 
         machine.expect.element('@password').enabled;
@@ -201,7 +190,21 @@ module.exports = {
         credentials
             .waitForElementVisible('div.spinny')
             .waitForElementNotVisible('div.spinny');
+    },
+    'credential is searchable after saving': client => {
+        const credentials = client.page.credentials();
+        const row = '#credentials_table .List-tableRow';
+
+        const { search } = credentials.section.list.section;
+
+        search
+            .waitForElementVisible('@input')
+            .setValue('@input', `name:${store.credential.name}`)
+            .click('@searchButton');
+
+        credentials.waitForElementNotPresent(`${row}:nth-of-type(2)`);
+        credentials.expect.element(row).text.contain(store.credential.name);
 
         client.end();
-    }
+    },
 };

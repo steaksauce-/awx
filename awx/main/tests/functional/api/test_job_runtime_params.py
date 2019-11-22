@@ -1,4 +1,4 @@
-import mock
+from unittest import mock
 import pytest
 import yaml
 import json
@@ -6,7 +6,7 @@ import json
 from awx.api.serializers import JobLaunchSerializer
 from awx.main.models.credential import Credential
 from awx.main.models.inventory import Inventory, Host
-from awx.main.models.jobs import Job, JobTemplate
+from awx.main.models.jobs import Job, JobTemplate, UnifiedJobTemplate
 
 from awx.api.versioning import reverse
 
@@ -283,7 +283,7 @@ def test_job_launch_JT_with_validation(machine_credential, credential, deploy_jo
     deploy_jobtemplate.ask_variables_on_launch = True
     deploy_jobtemplate.save()
 
-    kv = dict(extra_vars={"job_launch_var": 4}, credentials=[machine_credential.pk])
+    kv = dict(extra_vars={"job_launch_var": 4}, credentials=[machine_credential.pk, credential.pk])
     serializer = JobLaunchSerializer(data=kv, context={'template': deploy_jobtemplate})
     validated = serializer.is_valid()
     assert validated, serializer.errors
@@ -291,7 +291,7 @@ def test_job_launch_JT_with_validation(machine_credential, credential, deploy_jo
     kv['credentials'] = [machine_credential]  # conversion to internal value
     job_obj = deploy_jobtemplate.create_unified_job(**kv)
 
-    final_job_extra_vars = yaml.load(job_obj.extra_vars)
+    final_job_extra_vars = yaml.safe_load(job_obj.extra_vars)
     assert 'job_launch_var' in final_job_extra_vars
     assert 'job_template_var' in final_job_extra_vars
     assert set([cred.pk for cred in job_obj.credentials.all()]) == set([machine_credential.id, credential.id])
@@ -309,8 +309,8 @@ def test_job_launch_with_default_creds(machine_credential, vault_credential, dep
 
     prompted_fields, ignored_fields, errors = deploy_jobtemplate._accept_or_ignore_job_kwargs(**kv)
     job_obj = deploy_jobtemplate.create_unified_job(**prompted_fields)
-    assert job_obj.credential == machine_credential.pk
-    assert job_obj.vault_credential == vault_credential.pk
+    assert job_obj.machine_credential.pk == machine_credential.pk
+    assert job_obj.vault_credentials[0].pk == vault_credential.pk
 
 
 @pytest.mark.django_db
@@ -338,25 +338,26 @@ def test_job_launch_JT_enforces_unique_credentials_kinds(machine_credential, cre
 
 
 @pytest.mark.django_db
-def test_job_launch_with_empty_creds(machine_credential, vault_credential, deploy_jobtemplate):
+def test_job_launch_with_empty_creds(machine_credential, vault_credential, deploy_jobtemplate, credential):
     deploy_jobtemplate.ask_credential_on_launch = True
     deploy_jobtemplate.credentials.add(machine_credential)
     deploy_jobtemplate.credentials.add(vault_credential)
-    kv = dict(credentials=[])
+    # `credentials` list is strictly those already present on deploy_jobtemplate
+    kv = dict(credentials=[credential.pk, machine_credential.pk, vault_credential.pk])
     serializer = JobLaunchSerializer(data=kv, context={'template': deploy_jobtemplate})
     validated = serializer.is_valid()
-    assert validated
+    assert validated, serializer.errors
 
-    prompted_fields, ignored_fields, errors = deploy_jobtemplate._accept_or_ignore_job_kwargs(**kv)
+    prompted_fields, ignored_fields, errors = deploy_jobtemplate._accept_or_ignore_job_kwargs(**serializer.validated_data)
     job_obj = deploy_jobtemplate.create_unified_job(**prompted_fields)
-    assert job_obj.credential is deploy_jobtemplate.credential
-    assert job_obj.vault_credential is deploy_jobtemplate.vault_credential
+    assert job_obj.machine_credential.pk == deploy_jobtemplate.machine_credential.pk
+    assert job_obj.vault_credentials[0].pk == deploy_jobtemplate.vault_credentials[0].pk
 
 
 @pytest.mark.django_db
 def test_job_launch_fails_with_missing_vault_password(machine_credential, vault_credential,
                                                       deploy_jobtemplate, post, rando):
-    vault_credential.vault_password = 'ASK'
+    vault_credential.inputs['vault_password'] = 'ASK'
     vault_credential.save()
     deploy_jobtemplate.credentials.add(vault_credential)
     deploy_jobtemplate.execute_role.members.add(rando)
@@ -439,7 +440,7 @@ def test_job_launch_fails_with_missing_multivault_password(machine_credential, v
 @pytest.mark.django_db
 def test_job_launch_fails_with_missing_ssh_password(machine_credential, deploy_jobtemplate, post,
                                                     rando):
-    machine_credential.password = 'ASK'
+    machine_credential.inputs['password'] = 'ASK'
     machine_credential.save()
     deploy_jobtemplate.credentials.add(machine_credential)
     deploy_jobtemplate.execute_role.members.add(rando)
@@ -456,9 +457,9 @@ def test_job_launch_fails_with_missing_ssh_password(machine_credential, deploy_j
 @pytest.mark.django_db
 def test_job_launch_fails_with_missing_vault_and_ssh_password(machine_credential, vault_credential,
                                                               deploy_jobtemplate, post, rando):
-    vault_credential.vault_password = 'ASK'
+    vault_credential.inputs['vault_password'] = 'ASK'
     vault_credential.save()
-    machine_credential.password = 'ASK'
+    machine_credential.inputs['password'] = 'ASK'
     machine_credential.save()
     deploy_jobtemplate.credentials.add(machine_credential)
     deploy_jobtemplate.credentials.add(vault_credential)
@@ -476,7 +477,7 @@ def test_job_launch_fails_with_missing_vault_and_ssh_password(machine_credential
 @pytest.mark.django_db
 def test_job_launch_pass_with_prompted_vault_password(machine_credential, vault_credential,
                                                       deploy_jobtemplate, post, rando):
-    vault_credential.vault_password = 'ASK'
+    vault_credential.inputs['vault_password'] = 'ASK'
     vault_credential.save()
     deploy_jobtemplate.credentials.add(machine_credential)
     deploy_jobtemplate.credentials.add(vault_credential)
@@ -516,6 +517,25 @@ def test_job_launch_JT_with_credentials(machine_credential, credential, net_cred
 
 
 @pytest.mark.django_db
+def test_job_branch_rejected_and_accepted(deploy_jobtemplate):
+    deploy_jobtemplate.ask_scm_branch_on_launch = True
+    deploy_jobtemplate.save()
+    prompted_fields, ignored_fields, errors = deploy_jobtemplate._accept_or_ignore_job_kwargs(
+        scm_branch='foobar'
+    )
+    assert 'scm_branch' in ignored_fields
+    assert 'does not allow override of branch' in errors['scm_branch']
+
+    deploy_jobtemplate.project.allow_override = True
+    deploy_jobtemplate.project.save()
+    prompted_fields, ignored_fields, errors = deploy_jobtemplate._accept_or_ignore_job_kwargs(
+        scm_branch='foobar'
+    )
+    assert not ignored_fields
+    assert prompted_fields['scm_branch'] == 'foobar'
+
+
+@pytest.mark.django_db
 @pytest.mark.job_runtime_vars
 def test_job_launch_unprompted_vars_with_survey(mocker, survey_spec_factory, job_template_prompts, post, admin_user):
     job_template = job_template_prompts(False)
@@ -552,19 +572,20 @@ def test_callback_accept_prompted_extra_var(mocker, survey_spec_factory, job_tem
 
     with mocker.patch('awx.main.access.BaseAccess.check_license'):
         mock_job = mocker.MagicMock(spec=Job, id=968, extra_vars={"job_launch_var": 3, "survey_var": 4})
-        with mocker.patch.object(JobTemplate, 'create_unified_job', return_value=mock_job):
+        with mocker.patch.object(UnifiedJobTemplate, 'create_unified_job', return_value=mock_job):
             with mocker.patch('awx.api.serializers.JobSerializer.to_representation', return_value={}):
                 with mocker.patch('awx.api.views.JobTemplateCallback.find_matching_hosts', return_value=[host]):
                     post(
                         reverse('api:job_template_callback', kwargs={'pk': job_template.pk}),
                         dict(extra_vars={"job_launch_var": 3, "survey_var": 4}, host_config_key="foo"),
                         admin_user, expect=201, format='json')
-                    assert JobTemplate.create_unified_job.called
-                    assert JobTemplate.create_unified_job.call_args == ({
+                    assert UnifiedJobTemplate.create_unified_job.called
+                    call_args = UnifiedJobTemplate.create_unified_job.call_args[1]
+                    call_args.pop('_eager_fields', None)  # internal purposes
+                    assert call_args == {
                         'extra_vars': {'survey_var': 4, 'job_launch_var': 3},
-                        '_eager_fields': {'launch_type': 'callback'},
-                        'limit': 'single-host'},
-                    )
+                        'limit': 'single-host'
+                    }
 
     mock_job.signal_start.assert_called_once()
 
@@ -578,18 +599,19 @@ def test_callback_ignore_unprompted_extra_var(mocker, survey_spec_factory, job_t
 
     with mocker.patch('awx.main.access.BaseAccess.check_license'):
         mock_job = mocker.MagicMock(spec=Job, id=968, extra_vars={"job_launch_var": 3, "survey_var": 4})
-        with mocker.patch.object(JobTemplate, 'create_unified_job', return_value=mock_job):
+        with mocker.patch.object(UnifiedJobTemplate, 'create_unified_job', return_value=mock_job):
             with mocker.patch('awx.api.serializers.JobSerializer.to_representation', return_value={}):
                 with mocker.patch('awx.api.views.JobTemplateCallback.find_matching_hosts', return_value=[host]):
                     post(
                         reverse('api:job_template_callback', kwargs={'pk':job_template.pk}),
                         dict(extra_vars={"job_launch_var": 3, "survey_var": 4}, host_config_key="foo"),
                         admin_user, expect=201, format='json')
-                    assert JobTemplate.create_unified_job.called
-                    assert JobTemplate.create_unified_job.call_args == ({
-                        '_eager_fields': {'launch_type': 'callback'},
-                        'limit': 'single-host'},
-                    )
+                    assert UnifiedJobTemplate.create_unified_job.called
+                    call_args = UnifiedJobTemplate.create_unified_job.call_args[1]
+                    call_args.pop('_eager_fields', None)  # internal purposes
+                    assert call_args == {
+                        'limit': 'single-host'
+                    }
 
     mock_job.signal_start.assert_called_once()
 

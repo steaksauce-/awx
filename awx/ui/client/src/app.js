@@ -10,9 +10,6 @@ if ($basePath) {
 }
 
 import start from './app.start';
-
-import portalMode from './portal-mode/main';
-import systemTracking from './system-tracking/main';
 import inventoriesHosts from './inventories-hosts/main';
 import inventoryScripts from './inventory-scripts/main';
 import credentials from './credentials/main';
@@ -20,7 +17,6 @@ import credentialTypes from './credential-types/main';
 import organizations from './organizations/main';
 import managementJobs from './management-jobs/main';
 import workflowResults from './workflow-results/main';
-import jobResults from './job-results/main';
 import jobSubmission from './job-submission/main';
 import notifications from './notifications/main';
 import about from './about/main';
@@ -31,9 +27,7 @@ import configuration from './configuration/main';
 import home from './home/main';
 import login from './login/main';
 import activityStream from './activity-stream/main';
-import standardOut from './standard-out/main';
 import Templates from './templates/main';
-import jobs from './jobs/main';
 import teams from './teams/main';
 import users from './users/main';
 import projects from './projects/main';
@@ -41,6 +35,7 @@ import RestServices from './rest/main';
 import access from './access/main';
 import scheduler from './scheduler/main';
 import instanceGroups from './instance-groups/main';
+import shared from './shared/main';
 
 import atFeatures from '~features';
 import atLibComponents from '~components';
@@ -58,7 +53,6 @@ angular
         'angular-duration-format',
         'angularMoment',
         'AngularScheduler',
-        'angular-md5',
         'dndLists',
         'ncy-angular-breadcrumb',
         'ngSanitize',
@@ -67,14 +61,13 @@ angular
         'gettext',
         'Timezones',
         'lrInfiniteScroll',
-
+        shared.name,
         about.name,
         access.name,
         license.name,
         RestServices.name,
         browserData.name,
         configuration.name,
-        systemTracking.name,
         inventoriesHosts.name,
         inventoryScripts.name,
         credentials.name,
@@ -86,13 +79,9 @@ angular
         login.name,
         activityStream.name,
         workflowResults.name,
-        jobResults.name,
         jobSubmission.name,
         notifications.name,
-        standardOut.name,
         Templates.name,
-        portalMode.name,
-        jobs.name,
         teams.name,
         users.name,
         projects.name,
@@ -102,7 +91,6 @@ angular
         'templates',
         'PromptDialog',
         'AWDirectives',
-        'features',
 
         instanceGroups,
         atFeatures,
@@ -118,7 +106,11 @@ angular
         $locationProvider.hashPrefix('');
     }])
     .config(['$logProvider', function($logProvider) {
-        $logProvider.debugEnabled($ENV['ng-debug'] || false);
+        window.debug = function(){
+            $logProvider.debugEnabled(!$logProvider.debugEnabled());
+            return $logProvider.debugEnabled();
+        };
+        window.debug(false);
     }])
     .config(['ngToastProvider', function(ngToastProvider) {
         ngToastProvider.configure({
@@ -169,16 +161,16 @@ angular
             // })
         }
     ])
-    .run(['$stateExtender', '$q', '$compile', '$cookies', '$rootScope', '$log', '$stateParams',
+    .run(['$q', '$cookies', '$rootScope', '$log', '$stateParams',
         'CheckLicense', '$location', 'Authorization', 'LoadBasePaths', 'Timer',
-        'LoadConfig', 'Store', 'pendoService', 'Prompt', 'Rest',
-        'Wait', 'ProcessErrors', '$state', 'GetBasePath', 'ConfigService',
-        'FeaturesService', '$filter', 'SocketService', 'AppStrings', '$transitions',
-        function($stateExtender, $q, $compile, $cookies, $rootScope, $log, $stateParams,
+        'LoadConfig', 'Store', 'pendoService', 'Rest',
+        '$state', 'GetBasePath', 'ConfigService', 'ProcessErrors',
+        'SocketService', 'AppStrings', '$transitions', 'i18n',
+        function($q, $cookies, $rootScope, $log, $stateParams,
             CheckLicense, $location, Authorization, LoadBasePaths, Timer,
-            LoadConfig, Store, pendoService, Prompt, Rest, Wait,
-            ProcessErrors, $state, GetBasePath, ConfigService, FeaturesService,
-            $filter, SocketService, AppStrings, $transitions) {
+            LoadConfig, Store, pendoService, Rest,
+            $state, GetBasePath, ConfigService, ProcessErrors,
+            SocketService, AppStrings, $transitions, i18n) {
 
             $rootScope.$state = $state;
             $rootScope.$state.matches = function(stateName) {
@@ -206,6 +198,10 @@ angular
                 document.title = `Ansible ${$rootScope.BRAND_NAME} ${title}`;
             });
 
+            $rootScope.$on('ws-approval', () => {
+                fetchApprovalsCount();
+            });
+
             function activateTab() {
                 // Make the correct tab active
                 var base = $location.path().replace(/^\//, '').split('/')[0];
@@ -218,10 +214,24 @@ angular
                 }
             }
 
+            function fetchApprovalsCount() {
+                Rest.setUrl(`${GetBasePath('workflow_approvals')}?status=pending&page_size=1`);
+                Rest.get()
+                    .then(({data}) => {
+                        $rootScope.pendingApprovalCount = data.count;
+                    })
+                    .catch(({data, status}) => {
+                        ProcessErrors({}, data, status, null, {
+                            hdr: i18n._('Error!'),
+                            msg: i18n._('Failed to get workflow jobs pending approval. GET returned status: ') + status
+                        });
+                    });
+            }
+
             if ($rootScope.removeConfigReady) {
                 $rootScope.removeConfigReady();
             }
-            $rootScope.removeConfigReady = $rootScope.$on('ConfigReady', function() {
+            $rootScope.removeConfigReady = $rootScope.$on('ConfigReady', function(evt) {
                 var list, id;
                 // initially set row edit indicator for crud pages
                 if ($location.$$path && $location.$$path.split("/")[3] && $location.$$path.split("/")[3] === "schedules") {
@@ -242,23 +252,6 @@ angular
                 $rootScope.crumbCache = [];
 
                 $transitions.onStart({}, function(trans) {
-                    // Remove any lingering intervals
-                    // except on jobResults.* states
-                    var jobResultStates = [
-                        'jobResult',
-                        'jobResult.host-summary',
-                        'jobResult.host-event.details',
-                        'jobResult.host-event.json',
-                        'jobResult.host-events',
-                        'jobResult.host-event.stdout'
-                    ];
-                    if ($rootScope.jobResultInterval && !_.includes(jobResultStates, trans.to().name) ) {
-                        window.clearInterval($rootScope.jobResultInterval);
-                    }
-                    if ($rootScope.jobStdOutInterval && !_.includes(jobResultStates, trans.to().name) ) {
-                        window.clearInterval($rootScope.jobStdOutInterval);
-                    }
-
                     $rootScope.flashMessage = null;
 
                     $('#form-modal2 .modal-body').empty();
@@ -309,7 +302,7 @@ angular
                         if (trans.to().name && (trans.to().name !== "signIn"  && trans.to().name !== "signOut" && trans.to().name !== "license")) {
                             ConfigService.getConfig().then(function() {
                                 // if not headed to /login or /logout, then check the license
-                                CheckLicense.test(event);
+                                CheckLicense.test(evt);
                             });
                         }
                     }
@@ -317,7 +310,6 @@ angular
                 });
 
                 $transitions.onSuccess({}, function(trans) {
-
                     if(trans.to() === trans.from()) {
                         // check to see if something other than a search param has changed
                         let toParamsWithoutSearchKeys = {};
@@ -334,11 +326,11 @@ angular
                         }
 
                         if(!_.isEqual(toParamsWithoutSearchKeys, fromParamsWithoutSearchKeys)) {
-                            document.querySelector('.at-Layout-main').scrollTop = 0;
+                            document.body.scrollTop = document.documentElement.scrollTop = 0;
                         }
                     }
                     else {
-                        document.querySelector('.at-Layout-main').scrollTop = 0;
+                        document.body.scrollTop = document.documentElement.scrollTop = 0;
                     }
 
                     if (trans.from().name === 'license' && trans.params('to').hasOwnProperty('licenseMissing')) {
@@ -372,9 +364,13 @@ angular
                     } else {
                         $rootScope.$broadcast("RemoveIndicator");
                     }
+
+                    if(_.includes(trans.from().name, 'output') && trans.to().name === 'jobs'){
+                        $state.reload();
+                    }
                 });
 
-                if (!Authorization.getToken() || !Authorization.isUserLoggedIn()) {
+                if (!Authorization.isUserLoggedIn()) {
                     // User not authenticated, redirect to login page
                     if (!/^\/(login|logout)/.test($location.path())) {
                         $rootScope.preAuthUrl = $location.path();
@@ -395,14 +391,13 @@ angular
                     $rootScope.user_is_system_auditor = Authorization.getUserInfo('is_system_auditor');
 
                     // state the user refreshes we want to open the socket, except if the user is on the login page, which should happen after the user logs in (see the AuthService module for that call to OpenSocket)
-                    if (!_.contains($location.$$url, '/login')) {
+                    if (!_.includes($location.$$url, '/login')) {
                         ConfigService.getConfig().then(function() {
                             Timer.init().then(function(timer) {
                                 $rootScope.sessionTimer = timer;
                                 SocketService.init();
                                 pendoService.issuePendoIdentity();
                                 CheckLicense.test();
-                                FeaturesService.get();
                                 if ($location.$$path === "/home" && $state.current && $state.current.name === "") {
                                     $state.go('dashboard');
                                 } else if ($location.$$path === "/portal" && $state.current && $state.current.name === "") {
@@ -410,6 +405,7 @@ angular
                                 }
                             });
                         });
+                        fetchApprovalsCount();
                     }
                 }
 
@@ -434,9 +430,9 @@ angular
                 // create a promise that will resolve state $AnsibleConfig is loaded
                 $rootScope.loginConfig = $q.defer();
             }
-            if (!$rootScope.featuresConfigured) {
-                // create a promise that will resolve when features are loaded
-                $rootScope.featuresConfigured = $q.defer();
+            if (!$rootScope.basePathsLoaded) {
+                // create a promise that will resolve when base paths are loaded
+                $rootScope.basePathsLoaded = $q.defer();
             }
             $rootScope.licenseMissing = true;
             //the authorization controller redirects to the home page automatcially if there is no last path defined. in order to override

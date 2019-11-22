@@ -4,12 +4,12 @@
  * All Rights Reserved
  *************************************************/
 
-export default ['$scope', '$location', '$stateParams',
-    'OrganizationForm', 'Rest', 'ProcessErrors', 'Prompt',
-    'GetBasePath', 'Wait', '$state', 'ToggleNotification', 'CreateSelect2', 'InstanceGroupsService', 'InstanceGroupsData',
-    function($scope, $location, $stateParams,
-        OrganizationForm, Rest, ProcessErrors, Prompt,
-        GetBasePath, Wait, $state, ToggleNotification, CreateSelect2, InstanceGroupsService, InstanceGroupsData) {
+export default ['$scope', '$location', '$stateParams', 'isOrgAdmin', 'isNotificationAdmin',
+    'OrganizationForm', 'Rest', 'ProcessErrors', 'Prompt', 'i18n', 'isOrgAuditor',
+    'GetBasePath', 'Wait', '$state', 'ToggleNotification', 'CreateSelect2', 'InstanceGroupsService', 'InstanceGroupsData', 'ConfigData',
+    function($scope, $location, $stateParams, isOrgAdmin, isNotificationAdmin,
+        OrganizationForm, Rest, ProcessErrors, Prompt, i18n, isOrgAuditor,
+        GetBasePath, Wait, $state, ToggleNotification, CreateSelect2, InstanceGroupsService, InstanceGroupsData, ConfigData) {
 
         let form = OrganizationForm(),
             defaultUrl = GetBasePath('organizations'),
@@ -18,38 +18,56 @@ export default ['$scope', '$location', '$stateParams',
             id = $stateParams.organization_id,
             instance_group_url = defaultUrl + id + '/instance_groups/';
 
-        init();
+        $scope.isOrgAuditor = isOrgAuditor;
+        $scope.isOrgAdmin = isOrgAdmin;
+        $scope.isNotificationAdmin = isNotificationAdmin;
 
-        function init() {
-            $scope.$watch('organization_obj.summary_fields.user_capabilities.edit', function(val) {
-                if (val === false) {
-                    $scope.canAdd = false;
-                }
-            });
+        $scope.$watch('organization_obj.summary_fields.user_capabilities.edit', function(val) {
+            if (val === false) {
+                $scope.canAdd = false;
+            }
+        });
 
-            $scope.$emit("HideOrgListHeader");
-            $scope.instance_groups = InstanceGroupsData;
-        }
-
+        $scope.instance_groups = InstanceGroupsData;
+        const virtualEnvs = ConfigData.custom_virtualenvs || [];
+        $scope.custom_virtualenvs_visible = virtualEnvs.length > 1;
+        $scope.custom_virtualenvs_options = virtualEnvs.filter(
+            v => !/\/ansible\/$/.test(v)
+        );
 
         // Retrieve detail record and prepopulate the form
         Wait('start');
         Rest.setUrl(defaultUrl + id + '/');
         Rest.get()
-            .then(({data}) => {
-                let fld;
+        .then(({data}) => {
+            let fld;
 
-                $scope.organization_name = data.name;
-                for (fld in form.fields) {
-                    if (data[fld]) {
-                        $scope[fld] = data[fld];
-                        master[fld] = data[fld];
-                    }
+            $scope.sufficientRoleForNotifToggle = 
+                isNotificationAdmin && (
+                    $scope.is_system_auditor || 
+                    isOrgAuditor ||
+                    isOrgAdmin
+                );
+
+            $scope.sufficientRoleForNotif =  isNotificationAdmin || isOrgAuditor || $scope.user_is_system_auditor;
+            
+            $scope.organization_name = data.name;
+            for (fld in form.fields) {
+                if (typeof data[fld] !== 'undefined') {
+                    $scope[fld] = data[fld];
+                    master[fld] = data[fld];
                 }
+            }
 
-                $scope.organization_obj = data;
-                $scope.$emit('organizationLoaded');
-                Wait('stop');
+            CreateSelect2({
+                element: '#organization_custom_virtualenv',
+                multiple: false,
+                opts: $scope.custom_virtualenvs_options
+            });
+
+            $scope.organization_obj = data;
+            $scope.$emit('organizationLoaded');
+            Wait('stop');
         });
 
         $scope.toggleNotification = function(event, id, column) {
@@ -75,6 +93,9 @@ export default ['$scope', '$location', '$stateParams',
             Wait('start');
             for (fld in form.fields) {
                 params[fld] = $scope[fld];
+            }
+            if (!params.max_hosts || params.max_hosts === '') {
+                params.max_hosts = 0;
             }
             Rest.setUrl(defaultUrl + id + '/');
             Rest.put(params)
@@ -137,10 +158,10 @@ export default ['$scope', '$location', '$stateParams',
             };
 
             Prompt({
-                hdr: 'Delete',
+                hdr: i18n._('Delete'),
                 body: '<div class="Prompt-bodyQuery">Are you sure you want to remove the ' + title + ' below from ' + $scope.name + '?</div><div class="Prompt-bodyTarget">' + name + '</div>',
                 action: action,
-                actionText: 'DELETE'
+                actionText: i18n._('DELETE')
             });
 
         };
